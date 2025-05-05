@@ -33,16 +33,15 @@ class CustomImageDataset(Dataset):
 
 
 def load_data(data_folder, batch_size):
-    test_indoor = CustomImageDataset("Data/val_indoors.csv", data_folder, target_transform=ToTensor())
-    test_outdoor = CustomImageDataset("Data/val_outdoor.csv", data_folder, target_transform=ToTensor())
+    test_indoor = CustomImageDataset(os.path.join(data_folder, "val_indoors.csv"), data_folder, target_transform=ToTensor())
+    test_outdoor = CustomImageDataset(os.path.join(data_folder, "val_outdoor.csv"), data_folder, target_transform=ToTensor())
     test_data = test_indoor + test_outdoor
 
-    train_indoor = CustomImageDataset("Data/train_indoors.csv", data_folder, target_transform=ToTensor())
-    train_outdoor = CustomImageDataset("Data/train_outdoor.csv", data_folder, target_transform=ToTensor())
+    train_indoor = CustomImageDataset(os.path.join(data_folder, "train_indoors.csv"), data_folder, target_transform=ToTensor())
+    train_outdoor = CustomImageDataset(os.path.join(data_folder, "train_outdoor.csv"), data_folder, target_transform=ToTensor())
     train_data = train_indoor + train_outdoor
 
     train_dataloader = DataLoader(train_data, batch_size=batch_size, shuffle=True)
     test_dataloader = DataLoader(test_data)
 
     return train_dataloader, test_dataloader
-
