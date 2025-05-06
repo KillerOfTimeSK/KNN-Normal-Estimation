@@ -90,13 +90,14 @@ if __name__ == '__main__':
     # TODO tidy up the code and fragment it into functions or separate file
     # untrained angular error for val dataset = 29.03
     # untrained angular error for train dataset = 120.21
-    model = VGGNormal().cuda()
-    for batch_size in [16, 32, 64, 128]:
+
+    for batch_size in [64, 256]:
+        model = VGGNormal().cuda()
         train_dataloader, test_dataloader = load_data('Data', batch_size)
         loss_epoch_arr = []
         best_model = model.state_dict()
 
-        max_epochs = 1
+        max_epochs = 4
         min_loss = 1000000
         device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
@@ -132,20 +133,25 @@ if __name__ == '__main__':
                 torch.cuda.empty_cache()
 
             loss_epoch_arr.append(loss.item())
-
+            print("Evaluating Test dataset at the end of epoch %d" % (epoch + 1))
+            eval_test = evaluation(test_dataloader, model)
+            print("Evaluating Training dataset at the end of epoch %d" % (epoch + 1))
+            eval_train = evaluation(train_dataloader, model)
             print('Epoch: %d/%d, Test acc: %0.2f, Train acc: %0.2f' % (
                 epoch + 1, max_epochs,
-                evaluation(test_dataloader, model), evaluation(train_dataloader, model)))
+                eval_test, eval_train))
 
         model.load_state_dict(best_model)
         model.eval()
+        print("Evaluating Testing dataset with the best model")
         results_test = evaluation(test_dataloader, model)
         print('END: Test acc: %0.2f' % results_test)
         # change max_epochs value to > 1
         #plt.plot(loss_epoch_arr)
         #plt.show()
 
-        torch.save(best_model, ("models/model_angloss" + str(round(results_test, 2)) + "_batch" + str(batch_size) + ".pth"))
+        torch.save(best_model, ("models/model_angloss" + str(round(results_test, 2)) + "_batch" + str(batch_size) +
+                                "_e" + str(max_epochs) + ".pth"))
 
 
     model.eval()
