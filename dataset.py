@@ -8,12 +8,14 @@ import matplotlib.pyplot as plt
 from PIL import Image
 from torch import from_numpy
 
-class CustomImageDataset(Dataset):
-    def __init__(self, csv_file, img_dir, transform=None, target_transform=None):
+class ImageNormalDataset(Dataset):
+    def __init__(self, csv_file, img_dir, transform=None, target_transform=None, include_depth=False):
         self.img_paths = pd.read_csv(csv_file)
         self.img_dir = img_dir
         self.transform = transform
         self.target_transform = target_transform
+        self.include_depth = include_depth
+        self.depth_transform = ToTensor()
 
     def __len__(self):
         return len(self.img_paths)
@@ -22,6 +24,11 @@ class CustomImageDataset(Dataset):
         img_path = os.path.join(self.img_dir, self.img_paths.iloc[idx, 0])
         normal_path = os.path.join(self.img_dir, self.img_paths.iloc[idx, 0])[:-4] + "_normal.npy"
         image = Image.open(img_path)
+
+        if self.include_depth:
+            depth_path = os.path.join(self.img_dir, self.img_paths.iloc[idx, 1])
+            depth = self.depth_transform(np.load(depth_path)).repeat(3, 1, 1)
+
         try:
             normal = np.load(normal_path)
             normal = from_numpy(normal).permute(2, 0, 1)
@@ -34,12 +41,20 @@ class CustomImageDataset(Dataset):
             image = self.transform(image)
         if self.target_transform:
             normal = self.target_transform(normal)
+            if self.include_depth:
+                depth = self.target_transform(depth)
 
-        sample = {'image': image, 'normal': normal}
+        if self.include_depth:
+            sample = {'image': image, 'depth': depth, 'normal': normal}
+        else:
+            sample = {'image': image, 'normal': normal}
         return sample
 
 
-def load_data(data_folder, batch_size, size=(224, 224)):
+def load_data(data_folder, batch_size, size=(224, 224), indoor=True, outdoor=True, depth=False):
+    if not (indoor or outdoor):
+        raise RuntimeError('When loading dataset you need so select at least one subdataset. But neither indoor nor outdoor was selected.')
+
     in_transform_train = Compose([
         Resize(size),
         ToTensor(),
@@ -58,13 +73,30 @@ def load_data(data_folder, batch_size, size=(224, 224)):
         Resize(size)
     ])
 
-    test_indoor = CustomImageDataset(os.path.join(data_folder, "val_indoors.csv"), data_folder, transform=in_transform_test, target_transform=out_transform_test)
-    test_outdoor = CustomImageDataset(os.path.join(data_folder, "val_outdoor.csv"), data_folder, transform=in_transform_test, target_transform=out_transform_test)
-    test_data = test_indoor + test_outdoor
+    if indoor:
+        test_indoor = ImageNormalDataset(os.path.join(data_folder, "val_indoors.csv"), data_folder,
+                                         transform=in_transform_test, target_transform=out_transform_test,
+                                         include_depth=depth)
+        train_indoor = ImageNormalDataset(os.path.join(data_folder, "train_indoors.csv"), data_folder,
+                                          transform=in_transform_train, target_transform=out_transform_train,
+                                          include_depth=depth)
+    if outdoor:
+        test_outdoor = ImageNormalDataset(os.path.join(data_folder, "val_outdoor.csv"), data_folder,
+                                          transform=in_transform_test, target_transform=out_transform_test,
+                                          include_depth=depth)
+        train_outdoor = ImageNormalDataset(os.path.join(data_folder, "train_outdoor.csv"), data_folder,
+                                           transform=in_transform_train, target_transform=out_transform_train,
+                                           include_depth=depth)
 
-    train_indoor = CustomImageDataset(os.path.join(data_folder, "train_indoors.csv"), data_folder, transform=in_transform_train, target_transform=out_transform_train)
-    train_outdoor = CustomImageDataset(os.path.join(data_folder, "train_outdoor.csv"), data_folder, transform=in_transform_train, target_transform=out_transform_train)
-    train_data = train_indoor + train_outdoor
+    if indoor and outdoor:
+        test_data = test_indoor + test_outdoor
+        train_data = train_indoor + train_outdoor
+    elif indoor:
+        test_data = test_indoor
+        train_data = train_indoor
+    elif outdoor:
+        test_data = test_outdoor
+        train_data = test_outdoor
 
     train_dataloader = DataLoader(train_data, batch_size=batch_size, shuffle=True)
     test_dataloader = DataLoader(test_data)
@@ -73,17 +105,22 @@ def load_data(data_folder, batch_size, size=(224, 224)):
 
 
 if __name__ == "__main__":
-    train, test = load_data("Data", 64, size=(224, 224))
+    train, test = load_data("Data", 64, size=(224, 224), depth=True)
     print(len(test))
     for data in test:
         print(data["image"].shape)
         print(data["normal"].shape)
+        print(data["depth"].shape)
         img = data['image'].squeeze(0).permute(1, 2, 0).numpy()
         normal = data['normal'].squeeze(0).permute(1, 2, 0).numpy()
-        plt.subplot(1, 2, 1)
+        depth = (np.atleast_3d(data['depth'].squeeze(0)[0]))
+        plt.subplot(1, 3, 1)
         plt.imshow(img)
         plt.title('Original Image')
-        plt.subplot(1, 2, 2)
+        plt.subplot(1, 3, 2)
+        plt.imshow(depth)
+        plt.title('Depth Image')
+        plt.subplot(1, 3, 3)
         plt.imshow(normal)
         plt.title('Normal Image')
         plt.show()
