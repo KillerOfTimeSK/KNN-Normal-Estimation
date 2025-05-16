@@ -1,46 +1,124 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from model_unet import AngularLoss
+from model_unet import AngularLoss, CombinedLoss, UNet
+import sys
+import matplotlib.pyplot as plt
 
-def TrainModel(model, name, dataLoader, epochs=10, use_gpu=True):
+def visualize_predictions(image_ids, dataset, model, num_images=3, use_gpu=True):
+    if num_images > len(image_ids): num_images = len(image_ids)
+    image_ids = image_ids[:num_images]
+
+    if use_gpu:
+        if isinstance(model, UNet): model.ToDevice('cuda')
+        else: model = model.cuda()
+    
+    predictions = []; images = []; normals = []
+    model.eval()
+    for id in image_ids:
+        id = id % len(dataset)
+        _, rgbT, tensor, normal = dataset.GetImage(id)
+        images.append(rgbT)
+        normals.append((normal.permute(1, 2, 0) + 1) / 2)
+        if use_gpu: tensor = tensor.to('cuda').unsqueeze(0)
+        else: tensor = tensor.unsqueeze(0)
+        with torch.no_grad():
+            prediction = model(tensor)
+            prediction = prediction.cpu().squeeze(0)
+            prediction = prediction.permute(1, 2, 0).numpy()
+            prediction = (prediction + 1) / 2
+            predictions.append(prediction)
+
+    for i in range(len(images)):
+        plt.figure(figsize=(12, 4))
+
+        plt.subplot(1, 3, 1)
+        plt.imshow(images[i])
+        plt.title('Input Image')
+
+        plt.subplot(1, 3, 2)
+        plt.imshow(normals[i])
+        plt.title('Ground Truth Normal')
+
+        plt.subplot(1, 3, 3)
+        plt.imshow(predictions[i])
+        plt.title('Predicted Normal')
+        #print(f"Shapes: RGB input:{images[i].size}, GT: {normals[i].shape}, predicted: {predictions[i].shape}")
+
+        plt.show()
+
+def TrainModel(model, name, dataLoader, file, epochs=10, train_dataset=None, use_gpu=True, LR=1e-3, lrShrink=0.9, maxLR=1e-2, minLR=1e-7):
     if use_gpu:
         torch.cuda.set_device(0)
         torch.cuda.empty_cache()
         torch.cuda.set_per_process_memory_fraction(0.9, 0)
-        model.MoveToGPU()
+        if isinstance(model, UNet): model.ToDevice('cuda')
+        else: model = model.cuda()
+    else: model.ToDevice('cpu')
     #optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
-    optimizer = torch.optim.Adam(filter(lambda p: p.requires_grad, model.parameters()), lr=0.0001)
-    criterion = AngularLoss()
+    optimizer = torch.optim.Adam(filter(lambda p: p.requires_grad, model.parameters()), lr=LR)
+    #criterion = CombinedLoss()
+    #criterion = AngularLoss()
+    criterion = nn.MSELoss()
+
+    image_ids = []
+    for i in range(6): image_ids.append(15+20*i)
     
     for epoch in range(epochs):
+        loss_sum = 0
+        model.train()
         for i, (rgb, normal) in enumerate(dataLoader):
-            PrintInfo = epoch == 0 and (i == 0 or i == 1 or i == 2 or i == 49 or i == 99)
-            PrintSimple = i % 100 == 0 or (epoch == 0 and (i == 1 or i == 2 or i == 3 or i == 4 or i == 9 or i == 14 or i == 24 or i == 49 or i == 74))
-            model.PrintSizes = epoch == 0 and i == 0
+            PrintInfo = epoch == 0 and (i == 0 or i == 5 or i == 6 or i == 7 or i == 8 or i == 49 or i == 99)
+            #PrintInfo = False
+            model.PrintSizes = PrintInfo
+            PrintSimple = i % 10 == 0 or (epoch == 0 and (i == 1 or i == 2 or i == 3 or i == 4 or i == 9 or i == 14 or i == 24))
+            #PrintInfo = True
+            #PrintSimple = True
 
             IterName = f'B{i+1} E{epoch+1}'
-            model.Profiler(f'{IterName}', rgb.shape, PrintInfo)
+            if isinstance(model, UNet): model.Profiler(f'{IterName}', rgb.shape, PrintInfo)
             if use_gpu:
                 rgb = rgb.to('cuda')
                 normal = normal.to('cuda')
             
             optimizer.zero_grad()
             output = model(rgb)
-            model.Profiler(f'{IterName} (forward)', output.shape, PrintInfo)
+            if isinstance(model, UNet): model.Profiler(f'{IterName} (forward)', output.shape, PrintInfo)
             if epoch == 0 and i == 0:
-                print(f'Output type: {output.dtype}')
-            size = output.shape[2:]
-            normal = F.interpolate(normal, size=size, mode='bilinear', align_corners=True)
+                file(f'Output type: {output.dtype}')
+            if output.shape != normal.shape:
+                size = output.shape[2:]
+                normal = F.interpolate(normal, size=size, mode='bilinear', align_corners=True)
             loss = criterion(output, normal)
-            model.Profiler(f'Loss {IterName}', loss.shape, PrintInfo)
+            loss_sum += loss.item()
+            if isinstance(model, UNet): model.Profiler(f'Loss {IterName}', loss.shape, PrintInfo)
             loss.backward()
-            model.Profiler(f'{IterName} (backward)', loss.shape, PrintInfo)
+            if isinstance(model, UNet):
+                if PrintInfo:
+                    file('_' * 50)
+                    model.PrintGrads()
+                    file('^' * 50)
+            if isinstance(model, UNet): model.Profiler(f'{IterName} (backward)', loss.shape, PrintInfo)
             optimizer.step()
-            model.Profiler(f'Optimizer {IterName}', loss.shape, PrintInfo)
+            if isinstance(model, UNet): model.Profiler(f'Optimizer {IterName}', loss.shape, PrintInfo)
             
-            if PrintSimple: print(f'Epoch [{epoch+1}/{epochs}], Step [{i+1}/{len(dataLoader)}], Loss: {loss.item():.4f}')
+            if PrintSimple: file.Important(f'Epoch [{epoch+1}/{epochs}], Step [{i+1}/{len(dataLoader)}], Loss: {loss.item():.4f}, Average running Loss: {loss_sum/(i+1):.4f}')
         torch.save(model.state_dict(), f'{name}_epoch_{epoch+1}.pth')
+        file.Important(f'Epoch [{epoch+1}/{epochs}] finished, Average Loss: {loss_sum/len(dataLoader):.4f}, Used LR={optimizer.param_groups[0]["lr"]:.2e}, Shrink={lrShrink:.2f}')
+        file.flush()
+        optimizer.param_groups[0]['lr'] *= lrShrink
+        if optimizer.param_groups[0]['lr'] <= minLR:
+            lrShrink = 1 / lrShrink
+            print(f"Learning rate too low ({optimizer.param_groups[0]['lr']:.2e}), will grow back by {lrShrink:.2f}")
+            optimizer.param_groups[0]['lr'] = minLR * lrShrink
+            print(f"Learning rate set to {optimizer.param_groups[0]['lr']:.2e}")
+        if optimizer.param_groups[0]['lr'] >= maxLR:
+            lrShrink = 1 / lrShrink
+            print(f"Learning rate too high ({optimizer.param_groups[0]['lr']:.2e}), will shrink back by {lrShrink:.2f}")
+            optimizer.param_groups[0]['lr'] = maxLR * lrShrink
+            print(f"Learning rate set to {optimizer.param_groups[0]['lr']:.2e}")
+
+        visualize_predictions(image_ids, train_dataset, model, 1)
     
     if use_gpu:
         torch.cuda.empty_cache()
@@ -51,11 +129,37 @@ def TrainModel(model, name, dataLoader, epochs=10, use_gpu=True):
     torch.save(model, name + '_architecture.pth')
     return model
 
-def LoadModel(model, model_path, use_gpu=True):
-    model.load_state_dict(torch.load(model_path + '_final.pth'))
+def LoadModel(model, model_path, use_gpu=True, version='_final.pth'):
+    model.load_state_dict(torch.load(model_path + version))
     if use_gpu: model = model.to('cuda')
     return model
 
+def ValidateModel(model, dataLoader, use_gpu=True):
+    if use_gpu:
+        torch.cuda.set_device(0)
+        torch.cuda.empty_cache()
+        torch.cuda.set_per_process_memory_fraction(0.9, 0)
+        if isinstance(model, UNet): model.ToDevice('cuda')
+        else: model = model.cuda()
+    else:
+        if isinstance(model, UNet): model.ToDevice('cpu')
+        else: model = model.cpu()
+    model.eval()
+    with torch.no_grad():
+        AngLoss = AngularLoss()
+        loss_sum = 0
+        for i, (rgb, normal) in enumerate(dataLoader):
+            if use_gpu:
+                rgb = rgb.to('cuda')
+                normal = normal.to('cuda')
+            output = model(rgb)
+            if output.shape != normal.shape:
+                size = output.shape[2:]
+                normal = F.interpolate(normal, size=size, mode='bilinear', align_corners=True)
+            loss = AngLoss(output, normal)
+            loss_sum += loss.item()
+            if i % 50 == 9: print(f'Validation Step [{i+1}/{len(dataLoader)}], Loss: {loss.item():.4f}')
+        print(f'Validation finished Average Loss: {loss_sum/len(dataLoader):.4f}')
 
 
 # Epoch [1/4], Step [3/263], Loss: 0.4121
