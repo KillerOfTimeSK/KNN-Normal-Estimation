@@ -2,10 +2,12 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from model_unet import AngularLoss, CombinedLoss, UNet
-import sys
+from main import angular_error
+import sys, os
 import matplotlib.pyplot as plt
+import numpy as np
 
-def visualize_predictions(image_ids, dataset, model, num_images=3, use_gpu=True):
+def visualize_predictions(image_ids, dataset, model, num_images=3, use_gpu=True, store_dir=None):
     if num_images > len(image_ids): num_images = len(image_ids)
     image_ids = image_ids[:num_images]
 
@@ -29,12 +31,18 @@ def visualize_predictions(image_ids, dataset, model, num_images=3, use_gpu=True)
             prediction = (prediction + 1) / 2
             predictions.append(prediction)
 
+    if store_dir is not None and not os.path.exists(store_dir): os.makedirs(store_dir)
+
     for i in range(len(images)):
         plt.figure(figsize=(12, 4))
 
         plt.subplot(1, 3, 1)
         plt.imshow(images[i])
         plt.title('Input Image')
+
+        if predictions[i].shape != normals[i].shape: 
+            print(f"Output shape: {predictions[i].shape}, Normal shape: {normals[i].shape}")
+            raise ValueError("Output and predicted shapes do not match.")
 
         plt.subplot(1, 3, 2)
         plt.imshow(normals[i])
@@ -45,21 +53,37 @@ def visualize_predictions(image_ids, dataset, model, num_images=3, use_gpu=True)
         plt.title('Predicted Normal')
         #print(f"Shapes: RGB input:{images[i].size}, GT: {normals[i].shape}, predicted: {predictions[i].shape}")
 
-        plt.show()
+        #plt.show()
+        if store_dir is not None: plt.savefig(os.path.join(store_dir, f'predictions_{i}.png'))
+        else: plt.show()
+        plt.close()
+        plt.clf()
 
-def TrainModel(model, name, dataLoader, file, epochs=10, train_dataset=None, use_gpu=True, LR=1e-3, lrShrink=0.9, maxLR=1e-2, minLR=1e-7):
+def TrainModel(model, name, dataLoader, file, epochs=10, train_dataset=None, use_gpu=True, LR=1e-3, lrShrink=0.9, maxLR=5e-2, minLR=1e-15, criterion=None, finisherLR=0.2, dropout=0.0):
     if use_gpu:
         torch.cuda.set_device(0)
         torch.cuda.empty_cache()
         torch.cuda.set_per_process_memory_fraction(0.9, 0)
-        if isinstance(model, UNet): model.ToDevice('cuda')
-        else: model = model.cuda()
-    else: model.ToDevice('cpu')
-    #optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
-    optimizer = torch.optim.Adam(filter(lambda p: p.requires_grad, model.parameters()), lr=LR)
+        # if isinstance(model, UNet): model.ToDevice('cuda')
+        # else: model = model.cuda()
+        model.to('cuda')
+    else: model.to('cpu')
+    # optimizer = torch.optim.Adam([
+    #     {'params': model.parameters(), 'lr': LR},
+    #     {'params': model.finisher.parameters(), 'lr': LR * 0.2},
+    # ], filter(lambda p: p.requires_grad, model.parameters()), lr=LR)
+    #optimizer = torch.optim.Adam(filter(lambda p: p.requires_grad, model.parameters()), lr=LR)
+    if finisherLR == 1:
+        optimizer = torch.optim.Adam(filter(lambda p: p.requires_grad, model.parameters()), lr=LR)
+    else:
+        finisherParams = set(model.finisher.parameters())
+        params = [{'params': filter(lambda p: p.requires_grad and p not in finisherParams, model.parameters()), 'lr': LR}]
+        params.append({'params': model.finisher.parameters(), 'lr': LR * finisherLR})
+        optimizer = torch.optim.Adam(params, dropout=dropout)
+    if criterion is None: criterion = nn.MSELoss()
     #criterion = CombinedLoss()
     #criterion = AngularLoss()
-    criterion = nn.MSELoss()
+    #criterion = nn.MSELoss()
 
     image_ids = []
     for i in range(6): image_ids.append(15+20*i)
@@ -86,9 +110,9 @@ def TrainModel(model, name, dataLoader, file, epochs=10, train_dataset=None, use
             if isinstance(model, UNet): model.Profiler(f'{IterName} (forward)', output.shape, PrintInfo)
             if epoch == 0 and i == 0:
                 file(f'Output type: {output.dtype}')
-            if output.shape != normal.shape:
-                size = output.shape[2:]
-                normal = F.interpolate(normal, size=size, mode='bilinear', align_corners=True)
+            if output.shape != normal.shape: 
+                print(f"Output shape: {output.shape}, Normal shape: {normal.shape}")
+                raise ValueError("Output and predicted shapes do not match.")
             loss = criterion(output, normal)
             loss_sum += loss.item()
             if isinstance(model, UNet): model.Profiler(f'Loss {IterName}', loss.shape, PrintInfo)
@@ -102,7 +126,9 @@ def TrainModel(model, name, dataLoader, file, epochs=10, train_dataset=None, use
             optimizer.step()
             if isinstance(model, UNet): model.Profiler(f'Optimizer {IterName}', loss.shape, PrintInfo)
             
-            if PrintSimple: file.Important(f'Epoch [{epoch+1}/{epochs}], Step [{i+1}/{len(dataLoader)}], Loss: {loss.item():.4f}, Average running Loss: {loss_sum/(i+1):.4f}')
+            learnInfo = f'Epoch [{epoch+1}/{epochs}], Step [{i+1}/{len(dataLoader)}], Loss: {loss.item():.4f}, Average running Loss: {loss_sum/(i+1):.4f}'
+            if PrintSimple: file.Important(learnInfo)
+            else: file(learnInfo)
         torch.save(model.state_dict(), f'{name}_epoch_{epoch+1}.pth')
         file.Important(f'Epoch [{epoch+1}/{epochs}] finished, Average Loss: {loss_sum/len(dataLoader):.4f}, Used LR={optimizer.param_groups[0]["lr"]:.2e}, Shrink={lrShrink:.2f}')
         file.flush()
@@ -146,20 +172,25 @@ def ValidateModel(model, dataLoader, use_gpu=True):
         else: model = model.cpu()
     model.eval()
     with torch.no_grad():
-        AngLoss = AngularLoss()
         loss_sum = 0
+        low, mid, high = 0, 0, 0
+        N = len(dataLoader)
         for i, (rgb, normal) in enumerate(dataLoader):
             if use_gpu:
                 rgb = rgb.to('cuda')
                 normal = normal.to('cuda')
             output = model(rgb)
-            if output.shape != normal.shape:
-                size = output.shape[2:]
-                normal = F.interpolate(normal, size=size, mode='bilinear', align_corners=True)
-            loss = AngLoss(output, normal)
-            loss_sum += loss.item()
-            if i % 50 == 9: print(f'Validation Step [{i+1}/{len(dataLoader)}], Loss: {loss.item():.4f}')
-        print(f'Validation finished Average Loss: {loss_sum/len(dataLoader):.4f}')
+            if output.shape != normal.shape: 
+                print(f"Output shape: {output.shape}, Normal shape: {normal.shape}")
+                raise ValueError("Output and predicted shapes do not match.")
+            err = np.mean(angular_error(normal.cpu().squeeze(0).permute(1, 2, 0).numpy(),
+                                output.cpu().squeeze(0).permute(1, 2, 0).numpy()))
+            loss_sum += err
+            if err < 11.25: low += 1
+            if err < 22.5: mid += 1
+            if err < 30: high += 1
+            if i % 50 == 9: print(f'Validation Step [{i+1}/{N}], Loss: {err:.4f}')
+        print(f'Validation finished Average Loss: {loss_sum/N:.4f}, <11.25: {(low/N)*100:.2f}%, <22.5: {(mid/N)*100:.2f}%, <30: {(high/N)*100:.2f}%')
 
 
 # Epoch [1/4], Step [3/263], Loss: 0.4121

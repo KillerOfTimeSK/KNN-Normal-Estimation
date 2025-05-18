@@ -16,7 +16,7 @@ def SetActive(module : nn.Module, isLive=True):
 def PrintGradients(module : nn.Module, file, moduleName=None):
     for name, param in module.named_parameters():
         if moduleName is not None: name = moduleName + '.' + name
-        if param.grad is not None: file(f'Gradient for {name}: mean={param.grad.mean():.4f}, std={param.grad.std():.4f}, min={param.grad.min():.4f}, max={param.grad.max():.4f}, size={param.grad.size()}')
+        if param.grad is not None: file(f'Gradient for {name}: mean={param.grad.mean():.4f}, std={param.grad.std():.4f}, min={param.grad.min():.4f}, max={param.grad.max():.4f}, size={param.grad.size()}, requires_grad={param.requires_grad}, device={param.device}')
         #else: print(f'No gradient for {name}')
 
 def PrintTensorStats(tensor, name, file):
@@ -24,37 +24,51 @@ def PrintTensorStats(tensor, name, file):
     else: file(f'{name} - No tensor')
 
 class DecoderBlock(nn.Module):
-    def __init__(self, inN, outN, innerN, extras, GlFeatures, file, moduleName=None):
+    def __init__(self, inN, outN, innerN, extras, GlFeatures, file, moduleName=None, useLarge=False):
         self.file = file
         self.moduleName = moduleName
-        self.firstPass = False
+        self.firstPass = True
         super(DecoderBlock, self).__init__()
         self.upsample = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True)
         self.inN = inN + extras + GlFeatures
         self.outN = outN
-        #self.file(f"Constructing DecoderBlock {moduleName} with innerN != outN, using inN={inN}, outN={outN}, innerN={innerN}, extras={extras}, GlFeatures={GlFeatures}")
-        self.inner = nn.Sequential(
-            nn.Conv2d(self.inN, innerN, kernel_size=1),
-            nn.LeakyReLU(inplace=True),
-            nn.Conv2d(innerN, innerN, kernel_size=3, dilation=2, padding=2, padding_mode='reflect'),
-            nn.LeakyReLU(inplace=True),
-            nn.Conv2d(innerN, innerN, kernel_size=3, padding=1, padding_mode='reflect'),
-            nn.LeakyReLU(inplace=True),
-            nn.Conv2d(innerN, innerN, kernel_size=3, padding=1, padding_mode='reflect'),
-            nn.LeakyReLU(inplace=True),
-            nn.Conv2d(innerN, self.outN, kernel_size=1),
-        )
+        self.file(f"Constructing DecoderBlock {moduleName} with innerN != outN, using inN={inN}, outN={outN}, innerN={innerN}, extras={extras}, GlFeatures={GlFeatures}")
+        if useLarge:
+            self.inner = nn.Sequential(
+                nn.Conv2d(self.inN, innerN, kernel_size=1),
+                nn.PReLU(),
+                nn.Conv2d(innerN, innerN, kernel_size=5, dilation=2, padding='same', padding_mode='reflect'),
+                nn.ReLU(inplace=True),
+                nn.Conv2d(innerN, innerN, kernel_size=3, padding='same', padding_mode='reflect'),
+                nn.ReLU(inplace=True),
+                nn.Conv2d(innerN, innerN, kernel_size=3, padding='same', padding_mode='reflect'),
+                nn.ReLU(inplace=True),
+                nn.Conv2d(innerN, self.outN, kernel_size=1),
+            )
+        else:
+            self.inner = nn.Sequential(
+                nn.Conv2d(self.inN, innerN, kernel_size=1),
+                nn.PReLU(),
+                nn.Conv2d(innerN, innerN, kernel_size=3, dilation=2, padding='same', padding_mode='reflect'),
+                nn.ReLU(inplace=True),
+                nn.Conv2d(innerN, innerN, kernel_size=3, padding='same', padding_mode='reflect'),
+                nn.ReLU(inplace=True),
+                nn.Conv2d(innerN, self.outN, kernel_size=1),
+            )
         self.transform = nn.Conv2d(self.inN, self.outN, kernel_size=1)
+        self.norm = nn.BatchNorm2d(self.outN)
         self.act = nn.Tanh()
     
     def InitWeights(self):
+        self.file(f"Initializing weights for DecoderBlock {self.moduleName}")
         for m in self.inner.modules():
             if isinstance(m, nn.Conv2d):
-                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='leaky_relu')
+                #nn.init.constant_(m.weight, 0.001)
                 if m.bias is not None: nn.init.zeros_(m.bias)
     
     def forward(self, x, extras, GlFeatures):
-        if self.firstPass: self.file(f"DecoderBlock input size: {x.size()}, extras size: {extras.size() if extras is not None else "No extras"}, GlFeatures size: {GlFeatures.size() if GlFeatures is not None else "No GlFeatures"} || {self.inN}, {self.outN}")
+        if self.firstPass: self.file(f"DecoderBlock {self.moduleName} input size: {x.size()}, extras size: {extras.size() if extras is not None else "No extras"}, GlFeatures size: {GlFeatures.size() if GlFeatures is not None else "No GlFeatures"} || {self.inN}, {self.outN}")
         if GlFeatures is not None:
             broadcasted = GlFeatures.expand(-1, -1, x.size()[2], x.size()[3])
             if extras is not None: x = torch.cat([x, broadcasted, extras], 1)
@@ -65,10 +79,16 @@ class DecoderBlock(nn.Module):
         if self.firstPass: self.file("DecoderBlock upsampled size:", x.size())
         simple = self.transform(x)
         processed = self.inner(x)
+        if self.PrintSizes: PrintTensorStats(x, "DecoderBlock before inner", self.file)
+        if self.PrintSizes: PrintTensorStats(processed, "DecoderBlock after inner", self.file)
+        if self.PrintSizes: PrintTensorStats(simple, "DecoderBlock after transform", self.file)
         self.firstPass = False
-        return self.act (simple + processed)
+        y = 0.2 * simple + 0.8 * processed
+        y = self.norm(y)
+        return self.act (y)
 
     def ToDevice(self, device):
+        self.file(f"Moving DecoderBlock {self.moduleName} to device:", device)
         self.upsample.to(device)
         self.inner.to(device)
         self.act.to(device)
@@ -76,17 +96,18 @@ class DecoderBlock(nn.Module):
         self.transform.to(device)
     
     def SetActive(self, isLive=True):
-        #self.file("Setting decoder block to activity:", isLive)
+        self.file("Setting decoder block to activity:", isLive)
         for module in [self, self.upsample, self.inner, self.transform, self.act]: SetActive(module, isLive)
 
     def PrintGrads(self): PrintGradients(self, self.file, self.moduleName)
 
 class UNet(nn.Module):
-    def __init__(self, file=sys.stdout):
+    def __init__(self, file=sys.stdout, useLarge=False, useGlobalFeatures=True):
         super(UNet, self).__init__()
         self.file = file
         self.Profiler = UNetProfiler(self.file)
         self.PrintSizes = True
+        self.useGlobalFeatures = useGlobalFeatures
         self.file("Preparing UNetBase")
         resnet50 = tvmodels.resnet50(weights='DEFAULT')
         self.encoder1 = nn.Sequential(resnet50.conv1, resnet50.bn1, resnet50.relu)
@@ -101,35 +122,52 @@ class UNet(nn.Module):
         self.encoderN = 5
         N = self.bottleneck_channels
 
-        self.globalFeatures = N // 4
-        self.globalExtractor = nn.Sequential(
-            nn.Conv2d(N * 4, 2 * self.globalFeatures, kernel_size=2, padding=0, stride=2),
-            nn.LeakyReLU(inplace=True),
-            nn.Conv2d(2 * self.globalFeatures, self.globalFeatures, kernel_size=4, padding=0),
-            nn.LeakyReLU(inplace=True),
-            nn.Conv2d(self.globalFeatures, self.globalFeatures, kernel_size=1),
-            nn.Tanh(),
+        self.normalizer = nn.Sequential(
+            nn.BatchNorm2d(4 * N),
+            nn.Tanh()
         )
+
+        if useGlobalFeatures:
+            self.globalFeatures = N // 4
+            self.globalExtractor = nn.Sequential(
+                nn.Conv2d(N * 4, 2 * self.globalFeatures, kernel_size=2, padding=0, stride=2),
+                nn.PReLU(),
+                nn.Conv2d(2 * self.globalFeatures, self.globalFeatures, kernel_size=4, padding=0),
+                nn.PReLU(),
+                nn.Conv2d(self.globalFeatures, self.globalFeatures, kernel_size=1),
+                nn.Tanh(),
+            )
+        else:
+            self.globalFeatures = 0
+            self.globalExtractor = None
         
         self.expSizes.append(('Decoder0', N * 4, N * 4))
-        self.out_size = N * 4
 
+        N = N * 2
+        self.decoder1 = DecoderBlock(2 * N, N, N // 2, 2 * N, self.globalFeatures, self.file, 'Decoder1', useLarge)
+        N = N // 2
+        self.decoder2 = DecoderBlock(2 * N, N, N // 2, 2 * N, self.globalFeatures, self.file, 'Decoder2', useLarge)
+        N = N // 2
+        self.decoder3 = DecoderBlock(2 * N, N, N // 2, 2 * N, self.globalFeatures, self.file, 'Decoder3', useLarge)
+        N = N // 2
+        self.decoder4 = DecoderBlock(2 * N, N, N // 2, 2 * N, self.globalFeatures, self.file, 'Decoder4', useLarge)
+        N = N // 2
         
-        N = self.out_size // 2
-        
-        self.decoders = []
-        input_size_dividers = [1, 1, 1, 1]
+        #self.decoders = []
+        # self.decoders = nn.ModuleList()
+        # input_size_dividers = [1, 1, 1, 1]
 
-        for i in range(len(input_size_dividers)):
-            extras = input_size_dividers[i]
-            if extras > 0: extras = 2 * N // extras
-            elif extras < 0: extras = 2 * N * (-extras)
-            self.expSizes.append(('Decoder' + str(i + 1), 2 * N + extras, N))
-            output_size = N
+        # for i in range(len(input_size_dividers)):
+        #     extras = input_size_dividers[i]
+        #     if extras > 0: extras = 2 * N // extras
+        #     elif extras < 0: extras = 2 * N * (-extras)
+        #     self.expSizes.append(('Decoder' + str(i + 1), 2 * N + extras, N))
+        #     output_size = N
 
-            decoder = DecoderBlock(2 * N, output_size, N // 2, extras, self.globalFeatures, self.file, f'Decoder{i+1}')
-            self.decoders.append(decoder)
-            N = output_size // 2
+        #     decoder = DecoderBlock(2 * N, output_size, N // 2, extras, self.globalFeatures, self.file, f'Decoder{i+1}')
+        #     self.decoders.append(decoder)
+        #     #self.decoderModules.append(decoder)
+        #     N = output_size // 2
 
         self.expSizes.append(('Finisher', 2 * N + 3, 3))
         self.finisher = nn.Sequential(
@@ -138,19 +176,24 @@ class UNet(nn.Module):
         )
 
     def InitWeights(self):
-        for decoder in self.decoders: decoder.InitWeights()
+        self.file("Initializing weights for UNetBase")
+        #for decoder in self.decoders: decoder.InitWeights()
+        for d in [self.decoder1, self.decoder2, self.decoder3, self.decoder4]: d.InitWeights()
         for m in self.finisher.modules():
             if isinstance(m, nn.Conv2d):
                 nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
                 if m.bias is not None: nn.init.zeros_(m.bias)
     
     def ToDevice(self, device):
-        blocks = [self.encoder1, self.encoder2, self.encoder3, self.encoder4, self.encoder5, self.globalExtractor, self.finisher]
-        for block in blocks:
-            block.to(device)
-            for i in range(block.__len__()): block[i].to(device)
+        pass
+        self.file(f"Moving UNetBase to device:", device)
+        #self.to(device)
+        # blocks = [self.encoder1, self.encoder2, self.encoder3, self.encoder4, self.encoder5, self.globalExtractor, self.finisher]
+        # for block in blocks:
+        #     block.to(device)
+        #     for i in range(block.__len__()): block[i].to(device)
 
-        for decoder in self.decoders: decoder.ToDevice(device)
+        # for decoder in self.decoders: decoder.ToDevice(device)
     
     def AddGlobalFeatures(self, x, g):
         broadcasted = g.expand(-1, -1, x.size()[2], x.size()[3])
@@ -158,6 +201,7 @@ class UNet(nn.Module):
         return x
 
     def forward(self, x):
+        for d in [self.decoder1, self.decoder2, self.decoder3, self.decoder4]: d.PrintSizes = self.PrintSizes
         self.Profiler("UNetBase Input", x.size(), self.PrintSizes)
         x0 = Functional.interpolate(x, size=(256, 256), mode='bilinear', align_corners=True)
         e1 = self.encoder1(x0)
@@ -166,22 +210,39 @@ class UNet(nn.Module):
         e4 = self.encoder4(e3)
         e5 = self.encoder5(e4)
         if self.PrintSizes: PrintTensorStats(e5, "ResNet", self.file)
-        #b1 = self.normalizer(e5)
+        b1 = self.normalizer(e5)
         b1 = e5
         if self.PrintSizes: PrintTensorStats(b1, "Normalized", self.file)
 
-        g = self.globalExtractor(b1)
+        if self.useGlobalFeatures: g = self.globalExtractor(b1)
+        else: g = None
         if self.PrintSizes: PrintTensorStats(g, "GlobalFeatures", self.file)
-        self.Profiler("UNetBase GlobalExtractor", g.size(), self.PrintSizes)
+        if g is not None: self.Profiler("UNetBase GlobalExtractor", g.size(), self.PrintSizes)
 
         #orig_size = x.size()[2:]
 
         y = b1
         outputs = [e5, e4, e3, e2]
-        for i in range(len(self.decoders)):
-            y = self.decoders[i](y, outputs[i], g)
-            self.Profiler(f"Full-UNet Decoder{i+1}", y.size(), self.PrintSizes)
-            if self.PrintSizes: PrintTensorStats(y, f"Decoder{i+1}", self.file)
+        # for i in range(len(self.decoders)):
+        #     y = self.decoders[i](y, outputs[i], g)
+        #     self.Profiler(f"Full-UNet Decoder{i+1}", y.size(), self.PrintSizes)
+        #     if self.PrintSizes: PrintTensorStats(y, f"Decoder{i+1}", self.file)
+        # for i, decoder in enumerate(self.decoders):
+        #     y = decoder(y, outputs[i], g)
+        #     self.Profiler(f"Full-UNet Decoder{i+1}", y.size(), self.PrintSizes)
+        #     if self.PrintSizes: PrintTensorStats(y, f"Decoder{i+1}", self.file)
+        y = self.decoder1(y, outputs[0], g)
+        self.Profiler("Full-UNet Decoder1", y.size(), self.PrintSizes)
+        if self.PrintSizes: PrintTensorStats(y, "Decoder1", self.file)
+        y = self.decoder2(y, outputs[1], g)
+        self.Profiler("Full-UNet Decoder2", y.size(), self.PrintSizes)
+        if self.PrintSizes: PrintTensorStats(y, "Decoder2", self.file)
+        y = self.decoder3(y, outputs[2], g)
+        self.Profiler("Full-UNet Decoder3", y.size(), self.PrintSizes)
+        if self.PrintSizes: PrintTensorStats(y, "Decoder3", self.file)
+        y = self.decoder4(y, outputs[3], g)
+        self.Profiler("Full-UNet Decoder4", y.size(), self.PrintSizes)
+        if self.PrintSizes: PrintTensorStats(y, "Decoder4", self.file)
 
         #if self.PrintSizes: print("Expanding current size:", y.size(), "to original size:", orig_size)
         #y = Functional.interpolate(y, size=orig_size, mode='bilinear', align_corners=True)
@@ -190,18 +251,20 @@ class UNet(nn.Module):
         if self.PrintSizes: PrintTensorStats(y, "Finisher", self.file)
         self.Profiler("Full-UNet Finisher", y.size(), self.PrintSizes)
         self.PrintSizes = False
+        for d in [self.decoder1, self.decoder2, self.decoder3, self.decoder4]: d.PrintSizes = False
         return y
     
     def PrintGrads(self):
         PrintGradients(self, self.file)
-        for block in self.decoders: block.PrintGrads()
+        #for block in self.decoders: block.PrintGrads()
     
     def SetActive(self, isLive=True):
         self.file("Setting UNetBase to activity:", isLive)
-        SetActive(self.globalExtractor, isLive)
+        #SetActive(self.globalExtractor, isLive)
         for layer in [self.encoder1, self.encoder2, self.encoder3, self.encoder4, self.encoder5]: SetActive(layer, False)
-        for decoder in self.decoders: decoder.SetActive(isLive)
-        SetActive(self.finisher, isLive)
+        # SetActive(self.decoders, isLive)
+        #for decoder in self.decoders: decoder.SetActive(False)
+        # SetActive(self.finisher, isLive)
 
 
 class CombinedLoss(nn.Module):

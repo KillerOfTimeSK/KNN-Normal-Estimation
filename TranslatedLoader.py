@@ -32,7 +32,7 @@ def FindMissingPath(path):
     return ret
 
 class NormalMapDataset(Dataset):
-    def __init__(self, csv_dir, translation_table, transform_rgb=None, transform_normal=None, valid_rgb=None):
+    def __init__(self, csv_dir, translation_table, transform_rgb=None, transform_normal=None, valid_rgb=None, more=None):
         self.data = pd.read_csv(csv_dir, header=None)
         self.data = self.data[self.data[3] != 'Unavailable']
         # self.data = self.data.iloc[::2, :].reset_index(drop=True)
@@ -45,8 +45,20 @@ class NormalMapDataset(Dataset):
         self.N = len(self.rgb_paths)
         # Translation table is dictionary<string, string> to create absolute path from relative path
         for key, value in translation_table.items():
-            if (self.rgb_paths[0].startswith(key)): self.rgb_paths = [path.replace(key, value) for path in self.rgb_paths]
-            if (self.normal_paths[0].startswith(key)): self.normal_paths = [path.replace(key, value) for path in self.normal_paths]
+            if self.rgb_paths[0].startswith(key): self.rgb_paths = [path.replace(key, value) for path in self.rgb_paths]
+            if self.normal_paths[0].startswith(key): self.normal_paths = [path.replace(key, value) for path in self.normal_paths]
+        
+        if more is not None: # Not enough time to do this the right way :()
+            moreData = pd.read_csv(more, header=None)
+            moreData = moreData[moreData[3] != 'Unavailable']
+            moreRGBPaths = moreData[0].tolist()
+            moreNormalPaths = moreData[3].tolist()
+            for key, value in translation_table.items():
+                if moreRGBPaths[0].startswith(key): moreRGBPaths = [path.replace(key, value) for path in moreRGBPaths]
+                if moreNormalPaths[0].startswith(key): moreNormalPaths = [path.replace(key, value) for path in moreNormalPaths]
+            self.rgb_paths += moreRGBPaths
+            self.normal_paths += moreNormalPaths
+            self.N = len(self.rgb_paths)
             
         self.transform_rgb = transform_rgb
         self.transform_normal = transform_normal
@@ -82,45 +94,26 @@ class NormalMapDataset(Dataset):
         normal = torch.from_numpy(normal).permute(2, 0, 1).float()
         rgbT = rgb.copy()
         tensor = rgb.copy()
-        if self.valid_rgb: TRGB = self.valid_rgb(TRGB)
+        if self.valid_rgb: rgbT = self.valid_rgb(rgbT)
         if self.transform_rgb: tensor = self.transform_rgb(rgb)
         if self.transform_normal: normal = self.transform_normal(normal)
         
         return rgb, rgbT, tensor, normal
 
+def GetDataset(csv_dir, translation_table, desiredOutSize=None, more=None):
+    transform_normal = None
+    if desiredOutSize is not None:
+        transform_normal = transforms.Compose([
+            transforms.Resize((desiredOutSize, desiredOutSize)),
+        ])
 
-transform_rgb = transforms.Compose([
-    #transforms.ConvertImageDtype(torch.float),
-    # transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5]),
-
-    # transforms.Resize(256),
-    # transforms.CenterCrop(224),
-    transforms.Resize((224, 224)),
-    transforms.ToTensor(),
-    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-    
-    # Resize((224, 224)),
-    # ToTensor(),
-])
-valid_rgb = transforms.Compose([
-    #transforms.ConvertImageDtype(torch.float),
-    # transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5]),
-
-    # transforms.Resize(256),
-    # transforms.CenterCrop(224),
-    transforms.Resize((224, 224)),
-    
-    # Resize((224, 224)),
-    # ToTensor(),
-])
-transform_normal = transforms.Compose([
-    # Already provided a tensor
-    #transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5]),
-    #transforms.Resize(256),
-    #transforms.CenterCrop(224),
-    #transforms.Resize((224, 224)),
-    transforms.Resize((112, 112)),
-])
-
-def GetDataset(csv_dir, translation_table):
-    return NormalMapDataset(csv_dir, translation_table, transform_rgb=transform_rgb, transform_normal=transform_normal)
+    return NormalMapDataset(csv_dir, translation_table,
+                            transform_rgb=transforms.Compose([
+                                transforms.Resize((224, 224)),
+                                transforms.ToTensor(),
+                                transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+                            ]),
+                            transform_normal=transform_normal,
+                            valid_rgb=transforms.Compose([
+                                transforms.Resize((224, 224)),
+                            ]), more=more)
