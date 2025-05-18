@@ -89,7 +89,7 @@ def result_print(predictor, dataloader, file, has_depth=False):
 if __name__ == "__main__":
     d = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     if len(sys.argv) < 2:
-        print("Missing model location as first argument")
+        print("Missing model location as first argument. Optional argument [--depth,-d] to evaluate VGG16 based model with depth map interpretation.")
         exit(1)
     model = sys.argv[1]
     if "-d" in sys.argv or "--depth" in sys.argv:
@@ -112,24 +112,20 @@ if __name__ == "__main__":
                                                   outdoor=False)
     train_outdoor_dataloader, test_outdoor_dataloader = load_data('Data', 1, depth=True, indoor=False,
                                                                 outdoor=True)
-    if j < 7:
-        needs_depth = False
-    else:
-        needs_depth = True
 
     f.write("DIODE; ALL DATA; TRAIN \n")
-    result_print(predictor, train_dataloader, f, needs_depth)
+    result_print(predictor, train_dataloader, f, depth)
     f.write("DIODE; ALL DATA; TEST \n")
-    result_print(predictor, test_dataloader, f, needs_depth)
+    result_print(predictor, test_dataloader, f, depth)
 
     f.write("DIODE; INDOOR DATA; TRAIN \n")
-    result_print(predictor, train_indoor_dataloader, f, needs_depth)
+    result_print(predictor, train_indoor_dataloader, f, depth)
     f.write("DIODE; INDOOR DATA; TEST \n")
-    result_print(predictor, test_indoor_dataloader, f, needs_depth)
+    result_print(predictor, test_indoor_dataloader, f, depth)
 
     f.write("DIODE; OUTDOOR DATA; TRAIN \n")
-    result_print(predictor, train_outdoor_dataloader, f, needs_depth)
+    result_print(predictor, train_outdoor_dataloader, f, depth)
     f.write("DIODE; OUTDOOR DATA; TEST \n")
-    result_print(predictor, test_outdoor_dataloader, f, needs_depth)
+    result_print(predictor, test_outdoor_dataloader, f, depth)
     f.write("\n-------------------------------------------------\n\n")
     f.close()
