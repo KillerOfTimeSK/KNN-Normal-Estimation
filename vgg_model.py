@@ -1,11 +1,6 @@
 from torchvision.models import vgg16, resnet50
 import torch.nn as nn
-from dataset import load_data
-import torch
-import matplotlib.pyplot as plt
-import copy
-from main import angular_error
-import numpy as np
+
 
 
 class VGGNormal(nn.Module):
@@ -55,9 +50,11 @@ class VGGNormal(nn.Module):
     def forward(self, x):
         outputs = {}
         for i, layer in enumerate(self.vgg):
+
             x = layer(x)
             if i in self.layer_ids:
                 outputs[f'layer_{i}'] = x
+
         # Reconstruct the image using the decoder
         x = self.decoder0(x) + outputs['layer_23']
         x = self.decoder1(x) + outputs['layer_16']
@@ -124,17 +121,13 @@ class VGGDepthNormal(nn.Module):
         y = self.resnet.bn1(y)
         y = self.resnet.relu(y)
         y1 = y
-
         y = self.resnet.maxpool(y)
         y = self.resnet.layer1(y)
         y2 = self.conv256_128(y)
-
         y = self.resnet.layer2(y)
         y3 = self.conv512_256(y)
-
         y = self.resnet.layer3(y)
         y4 = self.conv1024_512(y)
-
         y = self.resnet.layer4(y)
         y = self.conv2048_512(y)
 
@@ -155,137 +148,3 @@ class VGGDepthNormal(nn.Module):
         # Tanh for output in range <-1,1>
         return self.final(x)
 
-def evaluation(dataloader, model):
-    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-    model.eval()
-    total_err = 0
-    with torch.no_grad():
-        for i, data in enumerate(dataloader, 0):
-            if i % 100 == 0:
-                print('Evaluating %d/%d' % (i, len(dataloader)))
-            inputs = data['image']
-            normals = data['normal']
-            depths = data['depth']
-            inputs, normals, depths = inputs.to(device), normals.to(device), depths.to(device)
-            outputs = model(inputs, depths)
-            if normals.shape[0] == 1:
-                err = angular_error(normals.cpu().squeeze(0).permute(1, 2, 0).numpy(),
-                                    outputs.cpu().squeeze(0).permute(1, 2, 0).numpy())
-                tmp_err = np.mean(err)
-                if total_err > 0:
-                    total_err = (total_err + tmp_err) / 2
-                else:
-                    total_err = tmp_err
-            else:
-                gt_images = normals.cpu().squeeze(0).permute(0, 2, 3, 1).numpy()
-                pred_images = outputs.cpu().squeeze(0).permute(0, 2, 3, 1).numpy()
-                err_arr = np.zeros(gt_images.shape[0] + 1, dtype=float)
-                for i in range(gt_images.shape[0]):
-                    err_arr[i] = np.mean(angular_error(gt_images[i], pred_images[i]))
-
-                err_arr[-1] = total_err
-                if total_err > 0:
-                    total_err = np.mean(err_arr)
-                else:
-                    total_err = np.mean(err_arr[:-1])
-
-    return total_err
-
-
-if __name__ == '__main__':
-    # TODO tidy up the code and fragment it into functions or separate file
-    # untrained angular error for val dataset = 29.03
-    # untrained angular error for train dataset = 120.21
-    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-    #"""
-    for lr in [1e-3, 1e-4]:
-        for batch_size in [2, 4, 8, 16, 32, 64, 128]:
-            model = VGGDepthNormal().cuda()
-            train_dataloader, test_dataloader = load_data('Data', batch_size, depth=True)
-            loss_epoch_arr = []
-            best_model = model.state_dict()
-
-            max_epochs = 1
-            min_loss = 1000000
-
-
-            loss_fn = nn.MSELoss()
-            opt = torch.optim.Adam(model.parameters(), lr=lr)
-
-            n_iters = len(train_dataloader)
-            model.train()
-            for epoch in range(max_epochs):
-                for i, data in enumerate(train_dataloader, 0):
-                    inputs= data['image']
-                    normals = data['normal']
-                    depths = data['depth']
-                    inputs, normals, depths = inputs.to(device), normals.to(device), depths.to(device)
-
-                    opt.zero_grad()
-
-                    outputs = model(inputs, depths)
-                    loss = loss_fn(outputs, normals)
-                    loss.backward()
-                    opt.step()
-
-                    if min_loss > loss.item():
-                        min_loss = loss.item()
-                        best_model = copy.deepcopy(model.state_dict())
-                        print('Min loss %0.2f' % min_loss)
-
-                    if i % 100 == 0:
-                        print('Iteration: %d/%d, Loss: %0.2f' % (i, n_iters, loss.item()))
-
-                    del inputs, normals, outputs
-                    torch.cuda.empty_cache()
-
-                loss_epoch_arr.append(loss.item())
-                print("Evaluating Test dataset at the end of epoch %d" % (epoch + 1))
-                eval_test = evaluation(test_dataloader, model)
-                print("Evaluating Training dataset at the end of epoch %d" % (epoch + 1))
-                eval_train = evaluation(train_dataloader, model)
-                print('Epoch: %d/%d, Test acc: %0.2f, Train acc: %0.2f' % (epoch + 1, max_epochs, eval_test, eval_train))
-
-            model.load_state_dict(best_model)
-            model.eval()
-            print("Evaluating Testing dataset with the best model")
-            results_test = evaluation(test_dataloader, model)
-            print('END: Test acc: %0.2f' % results_test)
-            #if max_epochs > 1:
-            #    plt.plot(loss_epoch_arr)
-            #    plt.show()
-
-            torch.save(best_model, ("models/model_depth_angloss" + str(round(results_test, 2)) + "_batch" + str(batch_size) +
-                                "_e" + str(max_epochs) + "_lr" + str(round(lr, 6)) + ".pth"))
-    #"""
-    #model = VGGNormal().cuda()
-    #model.load_state_dict(torch.load("models/model_angloss35.6_batch8_e4.pth", weights_only=True))
-    #_, test_dataloader = load_data('Data', 1)
-    model.eval()
-    i = 0
-    for sample in test_dataloader:
-        img = sample['image'].squeeze(0).permute(1, 2, 0).numpy()
-        img_tensor = sample['image'].cuda()
-        depth = sample['depth'].cuda()
-        gt_image = sample['normal'].squeeze(0).permute(1, 2, 0).numpy()
-        with torch.no_grad():
-            reconstructed_image = model(img_tensor, depth)
-            reconstructed_image = reconstructed_image.cpu().squeeze(0).permute(1, 2, 0).numpy()  # Convert to numpy array
-
-            ang = np.mean(angular_error(gt_image, reconstructed_image))
-            if ang > 30:
-                continue
-            print(ang)
-            plt.subplot(1, 3, 1)
-            plt.imshow(img)
-            plt.title('Original Image')
-            plt.subplot(1, 3, 2)
-            plt.imshow(reconstructed_image)
-            plt.title('Reconstructed Image')
-            plt.subplot(1, 3, 3)
-            plt.imshow(gt_image)
-            plt.title('Ground Truth Image')
-            plt.show()
-        i += 1
-        if i >= 4:
-            exit(0)

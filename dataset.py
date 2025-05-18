@@ -3,8 +3,7 @@ import pandas as pd
 import numpy as np
 from torch.utils.data import Dataset
 from torch.utils.data import DataLoader
-from torchvision.transforms import ToTensor, Compose, Resize, Normalize, ToPILImage
-import matplotlib.pyplot as plt
+from torchvision.transforms import ToTensor, Compose, Resize
 from PIL import Image
 from torch import from_numpy
 
@@ -102,27 +101,3 @@ def load_data(data_folder, batch_size, size=(224, 224), indoor=True, outdoor=Tru
     test_dataloader = DataLoader(test_data)
 
     return train_dataloader, test_dataloader
-
-
-if __name__ == "__main__":
-    train, test = load_data("Data", 64, size=(224, 224), depth=True)
-    print(len(test))
-    for data in test:
-        print(data["image"].shape)
-        print(data["normal"].shape)
-        print(data["depth"].shape)
-        img = data['image'].squeeze(0).permute(1, 2, 0).numpy()
-        normal = data['normal'].squeeze(0).permute(1, 2, 0).numpy()
-        depth = (np.atleast_3d(data['depth'].squeeze(0)[0]))
-        plt.subplot(1, 3, 1)
-        plt.imshow(img)
-        plt.title('Original Image')
-        plt.subplot(1, 3, 2)
-        plt.imshow(depth)
-        plt.title('Depth Image')
-        plt.subplot(1, 3, 3)
-        plt.imshow(normal)
-        plt.title('Normal Image')
-        plt.show()
-
-        exit(0)
