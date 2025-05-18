@@ -2,8 +2,10 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from model_unet import AngularLoss, CombinedLoss, UNet
+from main import angular_error
 import sys, os
 import matplotlib.pyplot as plt
+import numpy as np
 
 def visualize_predictions(image_ids, dataset, model, num_images=3, use_gpu=True, store_dir=None):
     if num_images > len(image_ids): num_images = len(image_ids)
@@ -170,8 +172,9 @@ def ValidateModel(model, dataLoader, use_gpu=True):
         else: model = model.cpu()
     model.eval()
     with torch.no_grad():
-        AngLoss = AngularLoss()
         loss_sum = 0
+        low, mid, high = 0, 0, 0
+        N = len(dataLoader)
         for i, (rgb, normal) in enumerate(dataLoader):
             if use_gpu:
                 rgb = rgb.to('cuda')
@@ -180,10 +183,14 @@ def ValidateModel(model, dataLoader, use_gpu=True):
             if output.shape != normal.shape: 
                 print(f"Output shape: {output.shape}, Normal shape: {normal.shape}")
                 raise ValueError("Output and predicted shapes do not match.")
-            loss = AngLoss(output, normal)
-            loss_sum += loss.item()
-            if i % 50 == 9: print(f'Validation Step [{i+1}/{len(dataLoader)}], Loss: {loss.item():.4f}')
-        print(f'Validation finished Average Loss: {loss_sum/len(dataLoader):.4f}')
+            err = np.mean(angular_error(normal.cpu().squeeze(0).permute(1, 2, 0).numpy(),
+                                output.cpu().squeeze(0).permute(1, 2, 0).numpy()))
+            loss_sum += err
+            if err < 11.25: low += 1
+            if err < 22.5: mid += 1
+            if err < 30: high += 1
+            if i % 50 == 9: print(f'Validation Step [{i+1}/{N}], Loss: {err:.4f}')
+        print(f'Validation finished Average Loss: {loss_sum/N:.4f}, <11.25: {(low/N)*100:.2f}%, <22.5: {(mid/N)*100:.2f}%, <30: {(high/N)*100:.2f}%')
 
 
 # Epoch [1/4], Step [3/263], Loss: 0.4121
